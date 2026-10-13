@@ -77,6 +77,10 @@
               <i class="settings-category-icons material-icons">sports_esports</i>
               <label data-i18n="Input Settings">Input Settings</label>
             </div>
+            <div class="settings-category" id="openJoystickCalibration" onclick="JoystickCalibration.open()" tabindex="0" role="button">
+              <i class="settings-category-icons material-icons">gamepad</i>
+              <label>Joystick Calibration</label>
+            </div>
             <div class="settings-category" data-category="audioSettings" onclick="handleSettingsView('audioSettings')">
               <i class="settings-category-icons material-icons">volume_up</i>
               <label data-i18n="Audio Settings">Audio Settings</label>
@@ -551,6 +555,7 @@
   <script type="text/javascript" src="platform/i18n.js"></script>
   <script type="text/javascript" src="platform/common.js"></script>
   <script type="text/javascript" src="platform/gamepad.js"></script>
+  <script type="text/javascript" src="platform/joystick_calibration.js"></script>
   <script type="text/javascript" src="platform/audio.js"></script>
   <script type="text/javascript" src="platform/index.js"></script>
   <script type="text/javascript" src="platform/navigation.js"></script>

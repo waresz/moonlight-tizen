@@ -1,6 +1,8 @@
 user-data-dir/
 pnacl/
 build/
+/debug.log
+/scripts/
 
 # Object files
 *.o
@@ -49,5 +51,6 @@ dir.stamp
 
 # Visual Studio
 *.vs/
-*.vscode/
+.vscode/
+/.cache/vscode-moonlight-tizen/
 .DS_Store

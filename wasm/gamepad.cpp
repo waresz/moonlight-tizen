@@ -8,9 +8,90 @@
 #include <thread>
 #include <cmath>
 #include <map>
+#include <limits>
+#include <algorithm>
+#include <string>
 
 #include <Limelight.h>
 #include <emscripten/emscripten.h>
+
+// Immutable per-stream calibration snapshot. No DOM/window access from the streaming thread.
+namespace {
+struct CalibrationSettings {
+  bool enabled = false;
+  int buttons[17];
+  double centers[4] = {0, 0, 0, 0};
+  double minimums[4] = {-1, -1, -1, -1};
+  double maximums[4] = {1, 1, 1, 1};
+  double deadzones[2] = {0.08, 0.08};
+  bool invert[4] = {false, false, false, false};
+  CalibrationSettings() { for (int i = 0; i < 17; ++i) buttons[i] = i; }
+};
+std::array<CalibrationSettings, 4> calibrations;
+}
+
+void ApplyJoystickCalibrationSettings(const std::string& serialized) {
+  std::array<CalibrationSettings, 4> nextProfiles;
+  std::istringstream in(serialized);
+  for (int slot = 0; slot < 4; ++slot) {
+  CalibrationSettings next;
+  std::string token;
+  auto read = [&](double& value) -> bool {
+    if (!std::getline(in, token, ',')) return false;
+    try { value = std::stod(token); return std::isfinite(value); }
+    catch (...) { return false; }
+  };
+  double value = 0;
+  if (!read(value)) { calibrations = nextProfiles; return; }
+  next.enabled = (value == 1);
+  for (int i=0;i<17;++i) {
+    if (!read(value) || value < 0 || value > 31 || std::floor(value) != value) { calibrations = std::array<CalibrationSettings, 4>(); return; }
+    next.buttons[i] = static_cast<int>(value);
+  }
+  for (double& center : next.centers) {
+    if (!read(value) || value < -1 || value > 1) { calibrations = std::array<CalibrationSettings, 4>(); return; }
+    center = value;
+  }
+  for (double& deadzone : next.deadzones) {
+    if (!read(value) || value < 0 || value > 0.75) { calibrations = std::array<CalibrationSettings, 4>(); return; }
+    deadzone = value;
+  }
+  for (bool& invert : next.invert) {
+    if (!read(value)) { calibrations = std::array<CalibrationSettings, 4>(); return; }
+    invert = (value == 1);
+  }
+  // Optional measured ranges (V4). V3 snapshots keep the original -1/+1 bounds.
+  for (int i = 0; i < 4; ++i) {
+    if (!read(value)) break;
+    if (value < -1 || value > 1) { calibrations = std::array<CalibrationSettings, 4>(); return; }
+    next.minimums[i] = value;
+  }
+  for (int i = 0; i < 4; ++i) {
+    if (!read(value)) break;
+    if (value < -1 || value > 1) { calibrations = std::array<CalibrationSettings, 4>(); return; }
+    next.maximums[i] = value;
+  }
+  nextProfiles[slot] = next;
+  }
+  calibrations = nextProfiles;
+}
+
+static double CalibrateJoystickAxis(const CalibrationSettings& calibration, int index, double raw) {
+  if (!calibration.enabled || index < 0 || index >= 4 || !std::isfinite(raw)) return raw;
+  const double center = calibration.centers[index];
+  double adjusted = raw - center;
+  // Asymmetric normalization from observed hardware endpoints.
+  // Ignore unreliable / degenerate ranges rather than amplifying noise.
+  const double negativeTravel = center - calibration.minimums[index];
+  const double positiveTravel = calibration.maximums[index] - center;
+  const double divisor = adjusted < 0 ? negativeTravel : positiveTravel;
+  adjusted = divisor >= 0.12 ? adjusted / divisor : 0.0;
+  adjusted = std::max(-1.0, std::min(1.0, adjusted));
+  const double dead = calibration.deadzones[index / 2];
+  const double magnitude = std::abs(adjusted);
+  adjusted = magnitude <= dead ? 0.0 : std::copysign((magnitude - dead) / (1 - dead), adjusted);
+  return calibration.invert[index] ? -adjusted : adjusted;
+}
 
 // Bitmask for gamepad combo buttons to stop the streaming session
 const short STOP_STREAM_BUTTONS = BACK_FLAG | PLAY_FLAG | LB_FLAG | RB_FLAG;
@@ -63,7 +144,7 @@ static short GetActiveGamepadMask(int numGamepads) {
 }
 
 // Function to map gamepad buttons to flags
-static short GetButtonFlags(const EmscriptenGamepadEvent& gamepad) {
+static short GetButtonFlags(const EmscriptenGamepadEvent& gamepad, int gamepadID, const CalibrationSettings& calibration) {
   // Triggers are considered analog buttons in the "Emscripten API", however they need
   // to be passed in separate arguments for "Limelight" (it even lacks flags for them).
 
@@ -133,7 +214,9 @@ static short GetButtonFlags(const EmscriptenGamepadEvent& gamepad) {
   short result = 0;
   
   for (int i = 0; i < gamepad.numButtons && i < buttonMasksSize; ++i) {
-    if (gamepad.digitalButton[i] == EM_TRUE) {
+    // Mapping is target button -> physical source button, configured in Joystick Calibration.
+    const int source = calibration.enabled ? calibration.buttons[i] : i;
+    if (source >= 0 && source < gamepad.numButtons && gamepad.digitalButton[source] == EM_TRUE) {
       result |= buttonMasks[i];
     }
   }
@@ -199,19 +282,22 @@ void MoonlightInstance::PollGamepads() {
     }
 
     // Process input for active gamepad
-    const auto buttonFlags = GetButtonFlags(gamepad);
-    const auto leftTrigger = gamepad.analogButton[GamepadButton::LeftTrigger]
+    const CalibrationSettings& calibration = calibrations[std::min(3, std::max(0, gamepadID))];
+    const auto buttonFlags = GetButtonFlags(gamepad, gamepadID, calibration);
+    const int ltSource = calibration.enabled ? calibration.buttons[6] : 6;
+    const int rtSource = calibration.enabled ? calibration.buttons[7] : 7;
+    const auto leftTrigger = (ltSource >= 0 && ltSource < gamepad.numButtons ? gamepad.analogButton[ltSource] : 0.0)
       * std::numeric_limits<unsigned char>::max();
-    const auto rightTrigger = gamepad.analogButton[GamepadButton::RightTrigger]
+    const auto rightTrigger = (rtSource >= 0 && rtSource < gamepad.numButtons ? gamepad.analogButton[rtSource] : 0.0)
       * std::numeric_limits<unsigned char>::max();
-    const auto leftStickX = gamepad.axis[GamepadAxis::LeftX]
-      * std::numeric_limits<short>::max();
-    const auto leftStickY = -gamepad.axis[GamepadAxis::LeftY]
-      * std::numeric_limits<short>::max();
-    const auto rightStickX = gamepad.axis[GamepadAxis::RightX]
-      * std::numeric_limits<short>::max();
-    const auto rightStickY = -gamepad.axis[GamepadAxis::RightY]
-      * std::numeric_limits<short>::max();
+    const auto calibratedAxis = [&](int axis) -> double {
+      double raw = axis < gamepad.numAxes ? gamepad.axis[axis] : 0.0;
+      return CalibrateJoystickAxis(calibration, axis, raw);
+    };
+    const auto leftStickX = calibratedAxis(GamepadAxis::LeftX) * std::numeric_limits<short>::max();
+    const auto leftStickY = -calibratedAxis(GamepadAxis::LeftY) * std::numeric_limits<short>::max();
+    const auto rightStickX = calibratedAxis(GamepadAxis::RightX) * std::numeric_limits<short>::max();
+    const auto rightStickY = -calibratedAxis(GamepadAxis::RightY) * std::numeric_limits<short>::max();
 
     // Check if the current button flags match the defined button combination on the gamepad
     if (buttonFlags == STOP_STREAM_BUTTONS) {
