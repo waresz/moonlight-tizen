@@ -52,6 +52,8 @@ Por ejemplo, para que la entrada detectada como **Cross (X)** envíe **Circle (O
 4. Elegí **Finish Range Capture** para guardar el recorrido.
 5. Repetí el procedimiento para el otro stick y reiniciá el streaming.
 
+La captura de recorrido es temporal: **Cancel Range Capture**, cerrar la pantalla o cambiar de pestaña conserva los límites anteriores. **Finish Range Capture** solo guarda si ambos ejes tienen suficiente recorrido a cada lado del centro; si falta recorrido, podés continuar la medición o cancelarla.
+
 La pantalla muestra los valores **Raw** y **Corrected** y un indicador de la posición corregida. La configuración inicial utiliza una zona muerta interna del 8 % por stick; la interfaz no ofrece un control para modificarla.
 
 ## Compilación con Docker

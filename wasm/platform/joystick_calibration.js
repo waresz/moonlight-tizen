@@ -8,16 +8,50 @@ var JoystickCalibration = (function () {
   var names=['Cross (X)','Circle (O)','Square','Triangle','L1','R1','L2','R2','Share','Options','L3','R3','D-Pad Up','D-Pad Down','D-Pad Left','D-Pad Right','PS'];
   function defaults(){return {enabled:true,buttons:names.map(function(_,i){return i;}),centers:[0,0,0,0],minimums:[-1,-1,-1,-1],maximums:[1,1,1,1],deadzones:[0.08,0.08],invert:[false,false,false,false]};}
   function clone(o){return JSON.parse(JSON.stringify(o));}
+  function validRange(minimum,center,maximum){
+    return Number.isFinite(minimum)&&Number.isFinite(center)&&Number.isFinite(maximum)&&
+      minimum>=-1&&maximum<=1&&center-minimum>=.12&&maximum-center>=.12;
+  }
+  function normalizeSettings(saved){
+    var result=defaults();saved=saved&&typeof saved==='object'?saved:{};
+    if(typeof saved.enabled==='boolean')result.enabled=saved.enabled;
+    if(Array.isArray(saved.buttons)&&saved.buttons.length===names.length&&saved.buttons.every(function(n,i,all){
+      return Number.isInteger(n)&&n>=0&&n<names.length&&all.indexOf(n)===i;
+    }))result.buttons=saved.buttons.slice();
+    for(var i=0;i<4;i++){
+      var center=saved.centers&&saved.centers[i],minimum=saved.minimums&&saved.minimums[i],maximum=saved.maximums&&saved.maximums[i];
+      if(Number.isFinite(center)&&center>=-1&&center<=1)result.centers[i]=center;
+      if(validRange(minimum,result.centers[i],maximum)){
+        result.minimums[i]=minimum;result.maximums[i]=maximum;
+      }else if(!validRange(-1,result.centers[i],1))result.centers[i]=0;
+      if(saved.invert&&typeof saved.invert[i]==='boolean')result.invert[i]=saved.invert[i];
+    }
+    for(var j=0;j<2;j++){
+      var deadzone=saved.deadzones&&saved.deadzones[j];
+      if(Number.isFinite(deadzone)&&deadzone>=0&&deadzone<=.75)result.deadzones[j]=deadzone;
+    }
+    return result;
+  }
+  function normalizeStore(saved){
+    var profiles=saved.profiles.map(function(item,i){
+      item=item&&typeof item==='object'?item:{};
+      var name=typeof item.name==='string'?item.name.trim().slice(0,40):'';
+      return {name:name||(i===0?'Default':'Profile '+(i+1)),settings:normalizeSettings(item.settings)};
+    });
+    var slots=[0,0,0,0].map(function(_,i){var n=saved.slots&&saved.slots[i];return Number.isInteger(n)&&n>=0&&n<profiles.length?n:0;});
+    return {profiles:profiles,slots:slots};
+  }
   var store={profiles:[{name:'Default',settings:defaults()}],slots:[0,0,0,0]};
   try {
     var prior=JSON.parse(localStorage.getItem(KEY));
-    if(prior&&Array.isArray(prior.profiles)&&prior.profiles.length&&Array.isArray(prior.slots)){store=prior;}
-    else {var old=JSON.parse(localStorage.getItem(LEGACY));if(old&&old.centers&&old.buttons)store.profiles[0].settings=Object.assign(defaults(),old);}
+    if(prior&&Array.isArray(prior.profiles)&&prior.profiles.length){store=normalizeStore(prior);}
+    else {var old=JSON.parse(localStorage.getItem(LEGACY));if(old)store.profiles[0].settings=normalizeSettings(old);}
   }catch(e){console.warn(e);}
   function persist(){try{localStorage.setItem(KEY,JSON.stringify(store));}catch(e){console.warn(e);}}
   function profile(slot){return store.profiles[store.slots[slot]||0]||store.profiles[0];}
   function cfg(slot){return profile(slot).settings;}
-  var slot=0, modal=null, timer=null, capture=-1, focus=0, tab='profiles', identifying=false, pressedSnapshot=[], lastDetected=-1, mappingPhysical=-1, captureArmed=false, editMode='', focusedProfile=0, identifyExitLatch=false;
+  var slot=0, modal=null, timer=null, capture=-1, rangeCapture=null, focus=0, tab='profiles', identifying=false, pressedSnapshot=[], lastDetected=-1, mappingPhysical=-1, captureArmed=false, editMode='', focusedProfile=0, identifyExitLatch=false;
+  function cancelRange(){capture=-1;rangeCapture=null;}
   function pads(){return navigator.getGamepads?navigator.getGamepads():[];}
   function pad(){return pads()[slot]||null;}
   function axis(id,i,v){var p=cfg(Math.min(3,Math.max(0,id||0)));if(!p.enabled||!Number.isFinite(v))return v;
@@ -74,7 +108,7 @@ var JoystickCalibration = (function () {
   }
   function escapeText(s){return String(s).replace(/[&<>"]/g,function(x){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[x];});}
   function connectedList(){var result=[];var all=pads();for(var i=0;i<Math.min(4,all.length);i++)if(all[i]&&all[i].connected)result.push(i);return result;}
-  function render(){if(!modal)return;var root=document.getElementById('jc-content'),p=cfg(slot);capture=-1;mappingPhysical=-1;captureArmed=false;pressedSnapshot=[];
+  function render(){if(!modal)return;var root=document.getElementById('jc-content'),p=cfg(slot);cancelRange();mappingPhysical=-1;captureArmed=false;pressedSnapshot=[];
     [].forEach.call(modal.querySelectorAll('[data-tab]'),function(b){b.className=b.dataset.tab===tab?'active':'';});
     if(tab==='profiles'){
       var connected=connectedList();root.innerHTML='<div class="jc-panel"><h3>Connected Controllers</h3><p class="jc-muted">Choose a profile for each controller. The profile manager below works independently of the selected controller.</p><div id="jc-devices" class="jc-grid"></div></div>'+ 
@@ -131,8 +165,8 @@ var JoystickCalibration = (function () {
         var label=document.createElement('span');label.textContent=mode==='rename'?'Rename profile:':'Profile name:';
         var input=document.createElement('input');input.id='jc-name';input.type='text';input.maxLength=40;
         input.value=mode==='rename'?store.profiles[index].name:mode==='clone'?store.profiles[index].name+' Copy':'';
-        var save=document.createElement('button');save.textContent='Save name';
-        var cancel=document.createElement('button');cancel.textContent='Cancel';
+        var save=document.createElement('button');save.id='jc-name-save';save.textContent='Save name';
+        var cancel=document.createElement('button');cancel.id='jc-name-cancel';cancel.textContent='Cancel';
         save.onclick=function(){var name=input.value.trim();if(!name){status('Enter a profile name');input.focus();return;}
           if(mode==='rename')store.profiles[index].name=name;
           else {store.profiles.push({name:name,settings:mode==='clone'?clone(store.profiles[index].settings):defaults()});focusedProfile=store.profiles.length-1;}
@@ -147,15 +181,6 @@ var JoystickCalibration = (function () {
           save.focus();
           if(save.scrollIntoView)save.scrollIntoView({block:'nearest'});
         }
-        input.addEventListener('keydown',function(ev){
-          var key=ev.key,code=ev.keyCode;
-          if(key==='Enter'||key==='NumpadEnter'||code===13||key==='Tab'||code===9||key==='ArrowDown'||code===40){
-            ev.preventDefault();ev.stopImmediatePropagation();finishTyping();
-          }else if(key==='Escape'||key==='BrowserBack'||code===10009){
-            ev.preventDefault();ev.stopImmediatePropagation();input.blur();cancel.focus();
-          }
-          // Backspace is intentionally left to the native Samsung keyboard.
-        },true);
         input.addEventListener('change',function(){
           // Tizen virtual keyboard "Done" commonly commits with change/blur.
           // Do not save without explicit confirmation.
@@ -172,11 +197,34 @@ var JoystickCalibration = (function () {
       document.getElementById('jc-map-reset').onclick=function(){if(identifying||mappingPhysical>=0)return;p.buttons=names.map(function(_,i){return i;});persist();paintMapping();};
       paintMapping();
     }else{
-      root.innerHTML='<div class="jc-panel"><h3>Stick Calibration · '+profile(slot).name+'</h3><p class="jc-muted">Keep the stick untouched for Calibrate Center. For Measure Full Range, rotate along its entire outer edge, then Finish.</p><div class="jc-grid" id="jc-stick-panels"></div><div class="jc-row"><button id="jc-range-stop">Finish Range Capture</button><span id="jc-range-status" class="jc-highlight">Ready</span></div><p class="jc-muted">The displayed dot and corrected values use the saved calibration. Values are applied to streaming when you reconnect.</p></div>';
+      root.innerHTML='<div class="jc-panel"><h3>Stick Calibration · '+profile(slot).name+'</h3><p class="jc-muted">Keep the stick untouched for Calibrate Center. For Measure Full Range, rotate along its entire outer edge, then Finish. Cancel or leave this screen to keep your saved range.</p><div class="jc-grid" id="jc-stick-panels"></div><div class="jc-row"><button id="jc-range-stop">Finish Range Capture</button><button id="jc-range-cancel">Cancel Range Capture</button><span id="jc-range-status" class="jc-highlight">Ready</span></div><p class="jc-muted">The displayed dot and corrected values use the saved calibration. Values are applied to streaming when you reconnect.</p></div>';
       var panels=document.getElementById('jc-stick-panels');['Left','Right'].forEach(function(label,i){var d=document.createElement('div');d.innerHTML='<h3>'+label+' stick</h3><div class="jc-stick" id="jc-stick-'+i+'"><span class="jc-dot"></span></div><div id="jc-axis-'+i+'" class="jc-muted"></div><div class="jc-row"><button data-center="'+i+'">Calibrate Center</button><button data-measure="'+i+'">Measure Full Range</button></div>';panels.appendChild(d);});
-      [].forEach.call(root.querySelectorAll('[data-center]'),function(b){b.onclick=function(){var i=Number(b.dataset.center),g=pad();if(!g||g.axes.length<2*i+2){status('Controller axes unavailable');return;}p.centers[2*i]=g.axes[2*i];p.centers[2*i+1]=g.axes[2*i+1];persist();};});
-      [].forEach.call(root.querySelectorAll('[data-measure]'),function(b){b.onclick=function(){var i=Number(b.dataset.measure),g=pad();if(!g||g.axes.length<2*i+2){status('Controller axes unavailable');return;}capture=i;for(var a=2*i;a<2*i+2;a++){p.minimums[a]=g.axes[a];p.maximums[a]=g.axes[a];}document.getElementById('jc-range-status').textContent='Capturing '+(i?'RIGHT':'LEFT')+' stick';};});
-      document.getElementById('jc-range-stop').onclick=function(){capture=-1;persist();document.getElementById('jc-range-status').textContent='Saved. Restart stream to apply.';};
+      [].forEach.call(root.querySelectorAll('[data-center]'),function(b){b.onclick=function(){
+        var i=Number(b.dataset.center),g=pad();
+        if(capture>=0){document.getElementById('jc-range-status').textContent='Finish or cancel range capture before calibrating the center.';return;}
+        if(!g||!g.connected||g.axes.length<2*i+2){status('Controller axes unavailable');return;}
+        for(var a=2*i;a<2*i+2;a++)if(!validRange(p.minimums[a],g.axes[a],p.maximums[a])){status('Center outside the saved range. Keep the stick at rest.');return;}
+        p.centers[2*i]=g.axes[2*i];p.centers[2*i+1]=g.axes[2*i+1];persist();
+      };});
+      [].forEach.call(root.querySelectorAll('[data-measure]'),function(b){b.onclick=function(){
+        var i=Number(b.dataset.measure),g=pad();
+        if(!g||!g.connected||g.axes.length<2*i+2){status('Controller axes unavailable');return;}
+        var values=g.axes.slice(2*i,2*i+2);
+        if(!values.every(function(v){return Number.isFinite(v)&&v>=-1&&v<=1;})){status('Controller axes unavailable');return;}
+        capture=i;rangeCapture={minimums:values.slice(),maximums:values.slice(),deviceId:g.id};
+        document.getElementById('jc-range-status').textContent='Capturing '+(i?'RIGHT':'LEFT')+' stick';
+      };});
+      document.getElementById('jc-range-stop').onclick=function(){
+        if(capture<0||!rangeCapture)return;
+        var g=pad();
+        if(!g||!g.connected||g.id!==rangeCapture.deviceId){cancelRange();document.getElementById('jc-range-status').textContent='Controller disconnected. Saved range unchanged.';return;}
+        for(var i=0;i<2;i++)if(!validRange(rangeCapture.minimums[i],p.centers[2*capture+i],rangeCapture.maximums[i])){
+          document.getElementById('jc-range-status').textContent='Incomplete range. Move the stick fully in every direction or cancel.';return;
+        }
+        for(var j=0;j<2;j++){p.minimums[2*capture+j]=rangeCapture.minimums[j];p.maximums[2*capture+j]=rangeCapture.maximums[j];}
+        cancelRange();persist();document.getElementById('jc-range-status').textContent='Saved. Restart stream to apply.';
+      };
+      document.getElementById('jc-range-cancel').onclick=function(){cancelRange();document.getElementById('jc-range-status').textContent='Cancelled. Saved range unchanged.';};
     }
   }
   function paintMapping(){var root=document.getElementById('jc-map-list');if(!root)return;root.innerHTML='';var p=cfg(slot);
@@ -241,11 +289,14 @@ var JoystickCalibration = (function () {
     pressedSnapshot=current;showDetected();
   }
   function poll(){var g=pad();status(g&&g.connected?'Controller '+(slot+1)+': '+g.id+' · '+g.axes.length+' axes / '+g.buttons.length+' buttons':'Controller '+(slot+1)+' disconnected');
-    if(!g||!g.connected)return;
+    if(!g||!g.connected){cancelRange();return;}
     if(tab==='mapping'&&identifying)handleIdentify(g);
     else if(tab==='mapping'&&mappingPhysical>=0)handleMappingCapture(g);
     if(tab==='sticks'){
-      var p=cfg(slot);if(capture>=0){for(var a=capture*2;a<capture*2+2;a++){p.minimums[a]=Math.min(p.minimums[a],g.axes[a]);p.maximums[a]=Math.max(p.maximums[a],g.axes[a]);}}
+      if(capture>=0&&rangeCapture){
+        if(g.id!==rangeCapture.deviceId){cancelRange();return;}
+        for(var a=0;a<2;a++){var value=g.axes[capture*2+a];if(Number.isFinite(value)&&value>=-1&&value<=1){rangeCapture.minimums[a]=Math.min(rangeCapture.minimums[a],value);rangeCapture.maximums[a]=Math.max(rangeCapture.maximums[a],value);}}
+      }
       for(var i=0;i<2;i++){var node=document.querySelector('#jc-stick-'+i+' .jc-dot'),read=document.getElementById('jc-axis-'+i);if(!node||g.axes.length<=2*i+1)continue;var x=g.axes[i*2],y=g.axes[i*2+1],xx=axis(slot,i*2,x),yy=axis(slot,i*2+1,y);
         node.style.left=(68+xx*65)+'px';node.style.top=(68+yy*65)+'px';read.textContent='Raw '+x.toFixed(3)+', '+y.toFixed(3)+' · Corrected '+xx.toFixed(3)+', '+yy.toFixed(3);}
     }
@@ -255,12 +306,18 @@ var JoystickCalibration = (function () {
   function navigate(k){if(mappingPhysical>=0)return;var list=inputs();var pos=list.indexOf(document.activeElement);if(pos>=0)focus=pos;var active=list[focus];if(k==='Enter'){if(active){if(active.tagName==='SELECT')return;active.click();}return;}focusAt(focus+((k==='ArrowDown'||k==='ArrowRight')?1:-1));}
   function isOpen(){return !!(modal&&modal.style.display!=='none');}
   function open(){if(!modal)html();modal.style.display='block';tab='profiles';render();if(timer)clearInterval(timer);timer=setInterval(poll,60);focusAt(0);}
-  function close(){capture=-1;mappingPhysical=-1;identifying=false;if(timer)clearInterval(timer);timer=null;if(modal)modal.style.display='none';}
+  function close(){cancelRange();mappingPhysical=-1;identifying=false;if(timer)clearInterval(timer);timer=null;if(modal)modal.style.display='none';}
   window.addEventListener('keydown',function(e){if(!isOpen())return;var k=e.key,c=e.keyCode;if(modal.querySelector('.jc-overlay')){var overlay=modal.querySelector('.jc-overlay');if(k==='Escape'||c===10009){e.preventDefault();e.stopImmediatePropagation();var cancel=overlay.querySelector('button');if(cancel)cancel.click();return;}if(['ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].indexOf(k)!==-1){e.preventDefault();e.stopImmediatePropagation();var options=Array.prototype.slice.call(overlay.querySelectorAll('button'));var idx=options.indexOf(document.activeElement);options[(idx+1)%options.length].focus();return;}if(k==='Enter'||c===13){e.preventDefault();e.stopImmediatePropagation();var act=document.activeElement;if(act&&overlay.contains(act))act.click();return;}return;}
     var typing=!!(e.target&&(/^(INPUT|TEXTAREA)$/).test(e.target.tagName));
     if(typing){
-      // The input's own handler processes Done/Down; don't navigate the background.
-      // Backspace, letters and IME composition must reach the native text editor.
+      // Handle name navigation here, before stopping propagation to the background.
+      // Ordinary typing and Backspace keep their native default behavior.
+      if(e.target.id==='jc-name'){
+        var next=null;
+        if(k==='Enter'||k==='NumpadEnter'||c===13||k==='Tab'||c===9||k==='ArrowDown'||k==='Down'||c===40)next=document.getElementById('jc-name-save');
+        else if(k==='Escape'||k==='BrowserBack'||c===10009)next=document.getElementById('jc-name-cancel');
+        if(next){e.preventDefault();e.target.blur();next.focus();if(next.scrollIntoView)next.scrollIntoView({block:'nearest'});}
+      }
       e.stopImmediatePropagation();return;
     }
     if(k==='Escape'||k==='BrowserBack'||c===10009){e.preventDefault();e.stopImmediatePropagation();if(mappingPhysical>=0){mappingPhysical=-1;captureArmed=false;paintMapping();}else if(identifying){identifying=false;paintMapping();var ib=document.getElementById('jc-identify');if(ib)ib.textContent='Start Identify';}else close();return;}

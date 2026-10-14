@@ -213,7 +213,7 @@ static short GetButtonFlags(const EmscriptenGamepadEvent& gamepad, int gamepadID
 
   short result = 0;
   
-  for (int i = 0; i < gamepad.numButtons && i < buttonMasksSize; ++i) {
+  for (int i = 0; i < buttonMasksSize; ++i) {
     // Mapping is target button -> physical source button, configured in Joystick Calibration.
     const int source = calibration.enabled ? calibration.buttons[i] : i;
     if (source >= 0 && source < gamepad.numButtons && gamepad.digitalButton[source] == EM_TRUE) {
